@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Local Folder Share</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="header">
+    <div class="container">
+      <h1>Local Folder Share</h1>
+      <p class="subtitle">Upload files or entire folders. Folders are preserved and zipped automatically.</p>
+      <p><a href="/list" class="btn small primary">View uploads</a></p>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="upload-card">
+      <div class="controls">
+        <label class="btn" for="fileInput">Choose files</label>
+        <input type="file" id="fileInput" multiple />
+        <label class="btn" for="folderInput">Choose folders</label>
+        <input type="file" id="folderInput" multiple webkitdirectory directory style="display:none;" />
+        <button id="uploadBtn" class="btn primary" disabled>Upload</button>
+        <button id="purgeBtn" class="btn small danger" type="button" title="Delete all uploads">Purge All</button>
+      </div>
+      <p class="muted" style="margin-top:6px;font-size:12px;">Folders are auto-zipped & original folder removed to save space.</p>
+      <div id="dropZone" class="dropzone">
+        <div class="dz-inner">
+          <strong>Drag and drop</strong> files or folders here
+          <small>We keep folder structure and names intact</small>
+        </div>
+      </div>
+      <ul id="fileList" class="file-list"></ul>
+      <div id="progressWrap" class="progress hidden">
+        <div id="progressBar" class="bar"></div>
+        <span id="progressText">0%</span>
+      </div>
+      <div id="result" class="result"></div>
+    </section>
+
+    <section class="uploads">
+      <h2>Uploads</h2>
+      <div id="uploads"></div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <span>Made for all screens • Responsive</span>
+    </div>
+  </footer>
+
+  <script>
+    const input = document.getElementById('fileInput');
+    const folderInput = document.getElementById('folderInput');
+    const uploadBtn = document.getElementById('uploadBtn');
+    const dropZone = document.getElementById('dropZone');
+    const fileList = document.getElementById('fileList');
+    const progressWrap = document.getElementById('progressWrap');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const resultDiv = document.getElementById('result');
+    const purgeBtn = document.getElementById('purgeBtn');
+
+    let pendingFiles = [];
+
+    input.addEventListener('change', () => collectFromFileInput(input.files));
+    folderInput.addEventListener('change', () => collectFromFileInput(folderInput.files));
+
+    function collectFromFileInput(fileListLike) {
+      pendingFiles = [];
+      const files = Array.from(fileListLike || []);
+      if (files.length === 0) {
+        uploadBtn.disabled = true;
+        fileList.innerHTML = '';
+        return;
+      }
+
+      // Collect relative paths if present
+      pendingFiles = files.map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+      renderPending();
+      uploadBtn.disabled = false;
+    }
+
+    dropZone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+
+    dropZone.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      const items = e.dataTransfer.items;
+      const collected = [];
+
+      async function traverse(entry, prefix = '') {
+        return new Promise((resolve) => {
+          if (entry.isFile) {
+            entry.file(f => {
+              const rel = prefix + entry.name;
+              collected.push({ file: new File([f], entry.name), path: rel });
+              resolve();
+            });
+          } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            reader.readEntries(async ents => {
+              for (const en of ents) {
+                await traverse(en, prefix + entry.name + '/');
+              }
+              resolve();
+            });
+          }
+        });
+      }
+
+      for (let i = 0; i < items.length; i++) {
+        const entry = items[i].webkitGetAsEntry?.();
+        if (entry) await traverse(entry, '');
+      }
+
+      pendingFiles = collected;
+      renderPending();
+      uploadBtn.disabled = pendingFiles.length === 0;
+    });
+
+    function renderPending() {
+      fileList.innerHTML = pendingFiles.map(p => `<li title="${p.path}"><span class="name">${p.path}</span><span class="size">${formatBytes(p.file.size)}</span></li>`).join('');
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B','KB','MB','GB','TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+
+    uploadBtn.addEventListener('click', async () => {
+      if (!pendingFiles.length) return;
+      resultDiv.innerHTML = '';
+      progressWrap.classList.remove('hidden');
+      progressBar.style.width = '0%';
+      progressText.textContent = '0%';
+
+      const formData = new FormData();
+      for (const p of pendingFiles) {
+        formData.append('files', p.file, p.path);
+        formData.append('paths', p.path); // parallel array for server
+      }
+
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload');
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const percent = Math.round((e.loaded / e.total) * 100);
+            progressBar.style.width = percent + '%';
+            progressText.textContent = percent + '%';
+          }
+        };
+        xhr.onload = () => {
+          progressBar.style.width = '100%';
+          progressText.textContent = '100%';
+          resultDiv.innerHTML = xhr.responseText;
+          loadUploads();
+        };
+        xhr.onerror = () => {
+          resultDiv.textContent = 'Upload failed';
+        };
+        xhr.send(formData);
+      } catch (e) {
+        resultDiv.textContent = 'Upload failed';
+      }
+    });
+
+    function timeAgo(seconds) {
+      if (seconds < 60) return seconds + 's ago';
+      const m = Math.floor(seconds/60); if (m < 60) return m + 'm ago';
+      const h = Math.floor(m/60); if (h < 24) return h + 'h ago';
+      const d = Math.floor(h/24); return d + 'd ago';
+    }
+
+    async function loadUploads() {
+      const res = await fetch('/api/uploads');
+      const data = await res.json();
+      const root = document.getElementById('uploads');
+      const parts = [];
+      if (data.folders?.length) {
+        parts.push('<h3>Folders</h3>');
+        parts.push('<div class="grid">');
+        for (const f of data.folders) {
+          const sizeLine = f.size ? `<div class=\"meta\">${formatBytes(f.size)}</div>` : '';
+          parts.push(`<div class="card" title="Modified ${timeAgo(f.ageSeconds)}"><div class="title">📁 ${f.name}</div><div class="meta">${f.count} items • ${timeAgo(f.ageSeconds)}</div>${sizeLine}<div class="actions"><a class="btn small" href="/download/zip/${encodeURIComponent(f.name)}">ZIP</a><button class="link danger" onclick="deleteUpload('${f.name}', true)">Delete</button></div></div>`);
+        }
+        parts.push('</div>');
+      }
+      if (data.files?.length) {
+        // separate archives for icon clarity
+        const archives = data.files.filter(f => f.name.toLowerCase().endsWith('.zip'));
+        const regular = data.files.filter(f => !f.name.toLowerCase().endsWith('.zip'));
+        if (regular.length) {
+          parts.push('<h3>Files</h3>');
+          parts.push('<div class="grid">');
+          for (const f of regular) {
+            parts.push(`<div class="card" title="Modified ${timeAgo(f.ageSeconds)}"><div class="title">📄 <a href="/raw/${encodeURIComponent(f.name)}" target="_blank" style="color:inherit;text-decoration:none;">${f.name}</a></div><div class="meta">${formatBytes(f.size)} • ${timeAgo(f.ageSeconds)}</div><div class="actions"><a class="btn small" href="/download/file/${encodeURIComponent(f.name)}">Download</a><button class="btn small" type="button" onclick="previewText('${encodeURIComponent(f.name)}')">Preview</button><button class="link danger" onclick="deleteUpload('${f.name}', false)">Delete</button></div></div>`);
+          }
+          parts.push('</div>');
+        }
+        if (archives.length) {
+          parts.push('<h3>Archives</h3>');
+          parts.push('<div class="grid">');
+          for (const f of archives) {
+            parts.push(`<div class="card" title="Modified ${timeAgo(f.ageSeconds)}"><div class="title">🗜️ ${f.name}</div><div class="meta">${formatBytes(f.size)} • ${timeAgo(f.ageSeconds)}</div><div class="actions"><a class="btn small" href="/download/file/${encodeURIComponent(f.name)}">Download</a><button class="link danger" onclick="deleteUpload('${f.name}', false)">Delete</button></div></div>`);
+          }
+          parts.push('</div>');
+        }
+      }
+      if (!data.folders?.length && !data.files?.length) {
+        parts.push('<p class="muted">No uploads yet.</p>');
+      }
+      root.innerHTML = parts.join('');
+    }
+
+    async function deleteUpload(name, isFolder) {
+      const ok = confirm('Delete ' + name + '?');
+      if (!ok) return;
+      const target = isFolder ? '/delete/folder/' + encodeURIComponent(name) : '/delete/file/' + encodeURIComponent(name);
+      const res = await fetch(target, { method: 'DELETE' });
+      if (res.ok) loadUploads(); else alert('Delete failed');
+    }
+
+    window.deleteUpload = deleteUpload;
+    purgeBtn.addEventListener('click', async () => {
+      if (!confirm('Delete ALL uploads (cannot be undone)?')) return;
+      const r = await fetch('/delete/all', { method: 'DELETE'});
+      if (r.ok) loadUploads(); else alert('Purge failed');
+    });
+    window.previewText = async (encName) => {
+      const name = decodeURIComponent(encName);
+      try {
+        const res = await fetch('/preview/text/' + encName);
+        if (!res.ok) { alert('Preview unavailable'); return; }
+        const txt = await res.text();
+        const w = window.open('', '_blank');
+        w.document.write(`<pre style="white-space:pre-wrap;font-family:monospace;">${escapeHtml(txt)}</pre>`);
+      } catch { alert('Preview failed'); }
+    };
+    function escapeHtml(str){ return str.replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+    loadUploads();
+  </script>
+</body>
+</html>
